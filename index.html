@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Image to Video Tool</title>
+    <style>
+        .container { max-width: 800px; margin: 0 auto; padding: 20px; }
+        .preview-canvas { border: 1px solid #ccc; margin: 10px 0; }
+        .controls { margin: 10px 0; }
+        .hidden { display: none; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Image to Video Tool</h1>
+        
+        <div class="controls">
+            <input type="file" id="imageInput" accept=".jpg,.jpeg,.png">
+            <select id="effectSelect">
+                <option value="panLeftRight">Pan Left to Right</option>
+                <option value="panRightLeft">Pan Right to Left</option>
+                <option value="zoomIn">Zoom In</option>
+                <option value="zoomOut">Zoom Out</option>
+            </select>
+            <input type="number" id="duration" value="10" min="1" max="60"> seconds
+            <button id="previewBtn">Preview</button>
+            <button id="exportBtn">Export MP4</button>
+        </div>
+
+        <canvas id="previewCanvas" class="preview-canvas"></canvas>
+        <div id="loading" class="hidden">Processing...</div>
+    </div>
+
+    <script src="https://unpkg.com/@ffmpeg/ffmpeg@0.11.0/dist/ffmpeg.min.js"></script>
+    <script>
+        const canvas = document.getElementById('previewCanvas');
+        const ctx = canvas.getContext('2d');
+        let originalImage = null;
+        let currentEffect = 'panLeftRight';
+        let animating = false;
+
+        // Initialize FFmpeg
+        const { createFFmpeg } = FFmpeg;
+        const ffmpeg = createFFmpeg({ log: true });
+
+        // Set canvas size to 16:9 (1280x720)
+        canvas.width = 1280;
+        canvas.height = 720;
+
+        // Event Listeners
+        document.getElementById('imageInput').addEventListener('change', handleImageUpload);
+        document.getElementById('effectSelect').addEventListener('change', (e) => {
+            currentEffect = e.target.value;
+        });
+        document.getElementById('previewBtn').addEventListener('click', startPreview);
+        document.getElementById('exportBtn').addEventListener('click', exportVideo);
+
+        async function handleImageUpload(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = async (event) => {
+                originalImage = new Image();
+                originalImage.src = event.target.result;
+                originalImage.onload = () => drawImage();
+            };
+            reader.readAsDataURL(file);
+        }
+
+        function drawImage(transform = { x: 0, y: 0, scale: 1 }) {
+            if (!originalImage) return;
+
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.save();
+            
+            // Calculate scaling to cover canvas
+            const scale = Math.max(
+                canvas.width / originalImage.width,
+                canvas.height / originalImage.height
+            );
+            const scaledWidth = originalImage.width * scale;
+            const scaledHeight = originalImage.height * scale;
+
+            // Apply transforms
+            ctx.translate(canvas.width/2, canvas.height/2);
+            ctx.scale(transform.scale, transform.scale);
+            ctx.drawImage(
+                originalImage,
+                -scaledWidth/2 + transform.x,
+                -scaledHeight/2 + transform.y,
+                scaledWidth,
+                scaledHeight
+            );
+            
+            ctx.restore();
+        }
+
+        function startPreview() {
+            if (!originalImage) return;
+            
+            animating = true;
+            const duration = document.getElementById('duration').value * 1000;
+            const startTime = Date.now();
+
+            function animate() {
+                if (!animating) return;
+                
+                const elapsed = Date.now() - startTime;
+                const progress = Math.min(elapsed / duration, 1);
+                
+                const transform = calculateTransform(progress);
+                drawImage(transform);
+
+                if (progress < 1) requestAnimationFrame(animate);
+            }
+            
+            animate();
+        }
+
+        function calculateTransform(progress) {
+            const effect = currentEffect;
+            const scale = 1;
+            let x = 0, y = 0;
+
+            // Calculate image scaling for effects
+            const imgScale = Math.max(
+                canvas.width / originalImage.width,
+                canvas.height / originalImage.height
+            );
+            const scaledWidth = originalImage.width * imgScale;
+            const scaledHeight = originalImage.height * imgScale;
+
+            switch(effect) {
+                case 'panLeftRight':
+                    x = (scaledWidth - canvas.width) * progress;
+                    break;
+                case 'panRightLeft':
+                    x = (scaledWidth - canvas.width) * (1 - progress);
+                    break;
+                case 'zoomIn':
+                    return { x: 0, y: 0, scale: 1 + progress * 0.5 };
+                case 'zoomOut':
+                    return { x: 0, y: 0, scale: 1.5 - progress * 0.5 };
+            }
+
+            return { x, y, scale: 1 };
+        }
+
+        async function exportVideo() {
+            if (!originalImage) return;
+            
+            document.getElementById('loading').classList.remove('hidden');
+            
+            await ffmpeg.load();
+            const duration = document.getElementById('duration').value;
+            const fps = 30;
+            const totalFrames = duration * fps;
+
+            // Generate frames
+            for (let i = 0; i < totalFrames; i++) {
+                const progress = i / totalFrames;
+                const transform = calculateTransform(progress);
+                drawImage(transform);
+                
+                const frame = await new Promise(resolve => 
+                    canvas.toBlob(resolve, 'image/jpeg', 0.9)
+                );
+                const frameData = await frame.arrayBuffer();
+                ffmpeg.FS('writeFile', `frame${i.toString().padStart(4, '0')}.jpg`, 
+                    new Uint8Array(frameData));
+            }
+
+            // Run FFmpeg command
+            await ffmpeg.run(
+                '-framerate', fps.toString(),
+                '-i', 'frame%04d.jpg',
+                '-c:v', 'libx264',
+                '-pix_fmt', 'yuv420p',
+                '-vf', 'scale=1280:720',
+                'output.mp4'
+            );
+
+            // Download result
+            const data = ffmpeg.FS('readFile', 'output.mp4');
+            const url = URL.createObjectURL(new Blob([data.buffer], { type: 'video/mp4' }));
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'video.mp4';
+            a.click();
+
+            document.getElementById('loading').classList.add('hidden');
+        }
+    </script>
+</body>
+</html>
